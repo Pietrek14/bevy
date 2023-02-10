@@ -4,12 +4,13 @@ use crate::{
     component::ComponentId,
     prelude::FromWorld,
     query::{Access, FilteredAccessSet},
-    schedule::{SystemLabel, SystemLabelId},
     system::{check_system_change_tick, ReadOnlySystemParam, System, SystemParam, SystemParamItem},
     world::{World, WorldId},
 };
 use bevy_ecs_macros::all_tuples;
-use std::{any::TypeId, borrow::Cow, fmt::Debug, marker::PhantomData};
+use std::{any::TypeId, borrow::Cow, marker::PhantomData};
+
+use super::ReadOnlySystem;
 
 /// The metadata of a [`System`].
 #[derive(Clone)]
@@ -170,7 +171,8 @@ impl<Param: SystemParam> SystemState<Param> {
     where
         Param: ReadOnlySystemParam,
     {
-        self.validate_world_and_update_archetypes(world);
+        self.validate_world(world);
+        self.update_archetypes(world);
         // SAFETY: Param is read-only and doesn't allow mutable access to World. It also matches the World this SystemState was created with.
         unsafe { self.get_unchecked_manual(world) }
     }
@@ -178,7 +180,8 @@ impl<Param: SystemParam> SystemState<Param> {
     /// Retrieve the mutable [`SystemParam`] values.
     #[inline]
     pub fn get_mut<'w, 's>(&'s mut self, world: &'w mut World) -> SystemParamItem<'w, 's, Param> {
-        self.validate_world_and_update_archetypes(world);
+        self.validate_world(world);
+        self.update_archetypes(world);
         // SAFETY: World is uniquely borrowed and matches the World this SystemState was created with.
         unsafe { self.get_unchecked_manual(world) }
     }
@@ -196,8 +199,20 @@ impl<Param: SystemParam> SystemState<Param> {
         self.world_id == world.id()
     }
 
-    fn validate_world_and_update_archetypes(&mut self, world: &World) {
+    /// Asserts that the [`SystemState`] matches the provided [`World`].
+    #[inline]
+    fn validate_world(&self, world: &World) {
         assert!(self.matches_world(world), "Encountered a mismatched World. A SystemState cannot be used with Worlds other than the one it was created with.");
+    }
+
+    /// Updates the state's internal view of the `world`'s archetypes. If this is not called before fetching the parameters,
+    /// the results may not accurately reflect what is in the `world`.
+    ///
+    /// This is only required if [`SystemState::get_manual`] or [`SystemState::get_manual_mut`] is being called, and it only needs to
+    /// be called if the `world` has been structurally mutated (i.e. added/removed a component or resource). Users using
+    /// [`SystemState::get`] or [`SystemState::get_mut`] do not need to call this as it will be automatically called for them.
+    #[inline]
+    pub fn update_archetypes(&mut self, world: &World) {
         let archetypes = world.archetypes();
         let new_generation = archetypes.generation();
         let old_generation = std::mem::replace(&mut self.archetype_generation, new_generation);
@@ -212,6 +227,43 @@ impl<Param: SystemParam> SystemState<Param> {
         }
     }
 
+    /// Retrieve the [`SystemParam`] values. This can only be called when all parameters are read-only.
+    /// This will not update the state's view of the world's archetypes automatically nor increment the
+    /// world's change tick.
+    ///
+    /// For this to return accurate results, ensure [`SystemState::update_archetypes`] is called before this
+    /// function.
+    ///
+    /// Users should strongly prefer to use [`SystemState::get`] over this function.
+    #[inline]
+    pub fn get_manual<'w, 's>(&'s mut self, world: &'w World) -> SystemParamItem<'w, 's, Param>
+    where
+        Param: ReadOnlySystemParam,
+    {
+        self.validate_world(world);
+        let change_tick = world.read_change_tick();
+        // SAFETY: Param is read-only and doesn't allow mutable access to World. It also matches the World this SystemState was created with.
+        unsafe { self.fetch(world, change_tick) }
+    }
+
+    /// Retrieve the mutable [`SystemParam`] values.  This will not update the state's view of the world's archetypes
+    /// automatically nor increment the world's change tick.
+    ///
+    /// For this to return accurate results, ensure [`SystemState::update_archetypes`] is called before this
+    /// function.
+    ///
+    /// Users should strongly prefer to use [`SystemState::get_mut`] over this function.
+    #[inline]
+    pub fn get_manual_mut<'w, 's>(
+        &'s mut self,
+        world: &'w mut World,
+    ) -> SystemParamItem<'w, 's, Param> {
+        self.validate_world(world);
+        let change_tick = world.change_tick();
+        // SAFETY: World is uniquely borrowed and matches the World this SystemState was created with.
+        unsafe { self.fetch(world, change_tick) }
+    }
+
     /// Retrieve the [`SystemParam`] values. This will not update archetypes automatically.
     ///
     /// # Safety
@@ -224,6 +276,19 @@ impl<Param: SystemParam> SystemState<Param> {
         world: &'w World,
     ) -> SystemParamItem<'w, 's, Param> {
         let change_tick = world.increment_change_tick();
+        self.fetch(world, change_tick)
+    }
+
+    /// # Safety
+    /// This call might access any of the input parameters in a way that violates Rust's mutability rules. Make sure the data
+    /// access is safe in the context of global [`World`] access. The passed-in [`World`] _must_ be the [`World`] the [`SystemState`] was
+    /// created with.
+    #[inline]
+    unsafe fn fetch<'w, 's>(
+        &'s mut self,
+        world: &'w World,
+        change_tick: u32,
+    ) -> SystemParamItem<'w, 's, Param> {
         let param = Param::get_param(&mut self.param_state, &self.meta, world, change_tick);
         self.meta.last_change_tick = change_tick;
         param
@@ -459,40 +524,22 @@ where
         );
     }
 
-    fn default_labels(&self) -> Vec<SystemLabelId> {
-        vec![self.func.as_system_label().as_label()]
-    }
-
-    fn default_system_sets(&self) -> Vec<Box<dyn crate::schedule_v3::SystemSet>> {
-        let set = crate::schedule_v3::SystemTypeSet::<F>::new();
+    fn default_system_sets(&self) -> Vec<Box<dyn crate::schedule::SystemSet>> {
+        let set = crate::schedule::SystemTypeSet::<F>::new();
         vec![Box::new(set)]
     }
 }
 
-/// A [`SystemLabel`] that was automatically generated for a system on the basis of its `TypeId`.
-pub struct SystemTypeIdLabel<T: 'static>(pub(crate) PhantomData<fn() -> T>);
-
-impl<T: 'static> SystemLabel for SystemTypeIdLabel<T> {
-    #[inline]
-    fn as_str(&self) -> &'static str {
-        std::any::type_name::<T>()
-    }
+/// SAFETY: `F`'s param is `ReadOnlySystemParam`, so this system will only read from the world.
+unsafe impl<In, Out, Param, Marker, F> ReadOnlySystem for FunctionSystem<In, Out, Param, Marker, F>
+where
+    In: 'static,
+    Out: 'static,
+    Param: ReadOnlySystemParam + 'static,
+    Marker: 'static,
+    F: SystemParamFunction<In, Out, Param, Marker> + Send + Sync + 'static,
+{
 }
-
-impl<T> Debug for SystemTypeIdLabel<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("SystemTypeIdLabel")
-            .field(&std::any::type_name::<T>())
-            .finish()
-    }
-}
-
-impl<T> Clone for SystemTypeIdLabel<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<T> Copy for SystemTypeIdLabel<T> {}
 
 /// A trait implemented for all functions that can be used as [`System`]s.
 ///
@@ -616,25 +663,3 @@ macro_rules! impl_system_function {
 // Note that we rely on the highest impl to be <= the highest order of the tuple impls
 // of `SystemParam` created.
 all_tuples!(impl_system_function, 0, 16, F);
-
-/// Used to implicitly convert systems to their default labels. For example, it will convert
-/// "system functions" to their [`SystemTypeIdLabel`].
-pub trait AsSystemLabel<Marker> {
-    fn as_system_label(&self) -> SystemLabelId;
-}
-
-impl<In, Out, Param: SystemParam, Marker, T: SystemParamFunction<In, Out, Param, Marker>>
-    AsSystemLabel<(In, Out, Param, Marker)> for T
-{
-    #[inline]
-    fn as_system_label(&self) -> SystemLabelId {
-        SystemTypeIdLabel::<T>(PhantomData).as_label()
-    }
-}
-
-impl<T: SystemLabel> AsSystemLabel<()> for T {
-    #[inline]
-    fn as_system_label(&self) -> SystemLabelId {
-        self.as_label()
-    }
-}

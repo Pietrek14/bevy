@@ -11,8 +11,9 @@ use bevy::{
         render_graph::{self, RenderGraph},
         render_resource::*,
         renderer::{RenderContext, RenderDevice},
-        RenderApp, RenderStage,
+        RenderApp, RenderSet,
     },
+    window::WindowPlugin,
 };
 use std::borrow::Cow;
 
@@ -23,11 +24,11 @@ fn main() {
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            window: WindowDescriptor {
+            primary_window: Some(Window {
                 // uncomment for unthrottled FPS
                 // present_mode: bevy::window::PresentMode::AutoNoVsync,
                 ..default()
-            },
+            }),
             ..default()
         }))
         .add_plugin(GameOfLifeComputePlugin)
@@ -73,7 +74,7 @@ impl Plugin for GameOfLifeComputePlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .init_resource::<GameOfLifePipeline>()
-            .add_system_to_stage(RenderStage::Queue, queue_bind_group);
+            .add_system(queue_bind_group.in_set(RenderSet::Queue));
 
         let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
         render_graph.add_node("game_of_life", GameOfLifeNode::default());
@@ -215,7 +216,7 @@ impl render_graph::Node for GameOfLifeNode {
         let pipeline = world.resource::<GameOfLifePipeline>();
 
         let mut pass = render_context
-            .command_encoder
+            .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
 
         pass.set_bind_group(0, texture_bind_group, &[]);

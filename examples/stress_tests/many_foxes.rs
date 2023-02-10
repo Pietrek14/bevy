@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    pbr::CascadeShadowConfigBuilder,
     prelude::*,
-    window::PresentMode,
+    window::{PresentMode, WindowPlugin},
 };
 
 #[derive(Resource)]
@@ -20,11 +21,11 @@ struct Foxes {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            window: WindowDescriptor {
-                title: "🦊🦊🦊 Many Foxes! 🦊🦊🦊".to_string(),
+            primary_window: Some(Window {
+                title: "🦊🦊🦊 Many Foxes! 🦊🦊🦊".into(),
                 present_mode: PresentMode::AutoNoVsync,
                 ..default()
-            },
+            }),
             ..default()
         }))
         .add_plugin(FrameTimeDiagnosticsPlugin)
@@ -160,7 +161,7 @@ fn setup(
 
     // Plane
     commands.spawn(PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Plane { size: 500000.0 })),
+        mesh: meshes.add(Mesh::from(shape::Plane { size: 5000.0 })),
         material: materials.add(Color::rgb(0.3, 0.5, 0.3).into()),
         ..default()
     });
@@ -172,6 +173,12 @@ fn setup(
             shadows_enabled: true,
             ..default()
         },
+        cascade_shadow_config: CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 0.9 * radius,
+            maximum_distance: 2.8 * radius,
+            ..default()
+        }
+        .into(),
         ..default()
     });
 
